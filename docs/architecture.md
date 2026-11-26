@@ -42,6 +42,35 @@ Saved server + workspace
 Transport code does not import UI concepts. Ghostty surface views do not read
 repositories directly.
 
+## GNU Screen
+
+GNU Screen support lives in `RemuxApp/Sources/Screen` and shares the SSH
+connection pool, credentials, and host-key trust with tmux.
+
+- `ScreenCommandBuilder`: builds `exec /bin/sh -c` commands with octal-encoded
+  arguments, the same injection-safe shape as the tmux builders. It also
+  escapes Screen's own `stuff` metacharacters (`^`, `\`, `$`).
+- `ScreenSessionListParser`: parses `screen -ls`, where a non-zero exit status
+  is normal.
+- `ScreenSessionService`: list, create, kill, stuff, wipe, and attach for one
+  saved server, over `RemuxAppDependencies`.
+- `ScreenTerminalSurfaceView`: a Ghostty terminal *producer* fed with raw PTY
+  bytes, drawn by a renderer-only Ghostty surface. Input leaves through the
+  surface's `write_cb`. Producers have a fixed grid, so a size or font change
+  rebuilds the producer and surface. The model then sends an SSH
+  `window-change` (or Ctrl+A l when the grid is unchanged) so Screen repaints.
+- `ScreenTerminalModel`: owns the PTY exec channel
+  (`RemuxSSHExecSession.openInteractive`), keeps inbound and outbound bytes in
+  order, and requests a background task while attached.
+
+```text
+Saved server
+-> ScreenSessionService
+-> SSH exec channel + PTY running screen -r
+-> Ghostty terminal producer (VT parser)
+-> Ghostty renderer surface
+```
+
 ## Persistence
 
 Live builds store app data under the app's application-support root:

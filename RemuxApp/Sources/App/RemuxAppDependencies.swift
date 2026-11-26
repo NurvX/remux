@@ -183,6 +183,85 @@ struct RemuxAppDependencies: Sendable {
         try await tmuxSessionDiscoverer(target, trustedHostStore, sshRootService)
     }
 
+    // MARK: GNU Screen
+
+    /// Runs one non-interactive command for the GNU Screen dashboard on the
+    /// server's pooled SSH connection.
+    func runScreenCommand(
+        _ command: String,
+        server: SavedServer,
+        sshAuth: ResolvedSSHAuth
+    ) async throws -> RemuxSSHExecResult {
+        let trace = RemuxTransportStartupTrace(flowID: nil)
+        let preparedRoot = await preparedScreenRoot(server: server, sshAuth: sshAuth, trace: trace)
+        do {
+            let sshRoot = try await preparedRoot.sshRoot()
+            let claimedRoot = try await preparedRoot.claim(sshRoot, trace: trace)
+            let result = try await RemuxSSHExecSession.run(
+                using: claimedRoot,
+                command: command,
+                stdin: nil,
+                trace: trace
+            )
+            await preparedRoot.cancelAndCleanup()
+            return result
+        } catch {
+            await preparedRoot.cancelAndCleanup()
+            throw error
+        }
+    }
+
+    /// Opens an interactive PTY channel for attaching to a Screen session.
+    /// The returned connection owns the SSH lease until it is closed.
+    func openScreenTerminal(
+        command: String,
+        pty: RemuxSSHPTYRequest,
+        server: SavedServer,
+        sshAuth: ResolvedSSHAuth,
+        onData: @escaping @Sendable (Data) -> Void,
+        onFinish: @escaping @Sendable (Int?, Error?) -> Void
+    ) async throws -> RemuxSSHExecConnection {
+        let trace = RemuxTransportStartupTrace(flowID: "screen.attach.\(server.id.uuidString)")
+        let preparedRoot = await preparedScreenRoot(server: server, sshAuth: sshAuth, trace: trace)
+        let claimedRoot: RemuxSSHClaimedRoot
+        do {
+            let sshRoot = try await preparedRoot.sshRoot()
+            claimedRoot = try await preparedRoot.claim(sshRoot, trace: trace)
+        } catch {
+            await preparedRoot.cancelAndCleanup()
+            throw error
+        }
+        // With a PTY, stdout and stderr are merged by the remote side; any
+        // extended data is still terminal output.
+        return try await RemuxSSHExecSession.openInteractive(
+            using: claimedRoot,
+            command: command,
+            pty: pty,
+            trace: trace,
+            onData: { _, data in onData(data) },
+            onFinish: onFinish
+        )
+    }
+
+    private func preparedScreenRoot(
+        server: SavedServer,
+        sshAuth: ResolvedSSHAuth,
+        trace: RemuxTransportStartupTrace
+    ) async -> RemuxSSHPreparedRoot {
+        let configuration = Self.sshRootConfiguration(
+            server: server,
+            sshAuth: sshAuth,
+            trustedHostStore: trustedHostStore,
+            tailscaleSSHCheckChallengeBroker: sshRootService.tailscaleSSHCheckChallengeBroker,
+            connectTimeout: RemuxConnectionTimeouts.terminalSSHConnect
+        )
+        return await sshRootService.preparedRoot(
+            for: RemuxSSHRootKey(server: server, sshAuth: sshAuth),
+            configuration: configuration,
+            trace: trace
+        )
+    }
+
     func closeIdleSSHConnections(forServerID serverID: SavedServer.ID) {
         Task {
             await sshRootService.closeIdleConnections(forServerID: serverID)
@@ -339,20 +418,36 @@ struct RemuxAppDependencies: Sendable {
         tailscaleSSHCheckChallengeBroker: TailscaleSSHCheckChallengeBroker?,
         connectTimeout: TimeAmount
     ) -> RemuxSSHRootConfiguration {
+        sshRootConfiguration(
+            server: target.server,
+            sshAuth: target.sshAuth,
+            trustedHostStore: trustedHostStore,
+            tailscaleSSHCheckChallengeBroker: tailscaleSSHCheckChallengeBroker,
+            connectTimeout: connectTimeout
+        )
+    }
+
+    private static func sshRootConfiguration(
+        server: SavedServer,
+        sshAuth: ResolvedSSHAuth,
+        trustedHostStore: TrustedHostStore,
+        tailscaleSSHCheckChallengeBroker: TailscaleSSHCheckChallengeBroker?,
+        connectTimeout: TimeAmount
+    ) -> RemuxSSHRootConfiguration {
         let tailscaleSSHCheck = tailscaleSSHCheckConfiguration(
-            credential: target.sshAuth.credential,
+            credential: sshAuth.credential,
             broker: tailscaleSSHCheckChallengeBroker
         )
         return RemuxSSHRootConfiguration(
-            host: target.server.host,
-            port: target.server.port,
+            host: server.host,
+            port: server.port,
             authenticationMethod: {
                 try SSHAuthenticationMethodFactory.make(
-                    username: target.sshAuth.username,
-                    credential: target.sshAuth.credential
+                    username: sshAuth.username,
+                    credential: sshAuth.credential
                 )
             },
-            hostKeyValidator: trustedHostStore.validator(for: target.server),
+            hostKeyValidator: trustedHostStore.validator(for: server),
             connectTimeout: connectTimeout,
             authenticationTimeout: tailscaleSSHCheck?.authenticationTimeout,
             onTailscaleSSHCheck: tailscaleSSHCheck?.onEvent

@@ -582,6 +582,12 @@ private struct RemuxWorkspaceShell: View {
                     Task { await model.deleteWorkspace(workspaceID) }
                 }
             )
+            .environment(
+                \.screenDashboardFactory,
+                ScreenDashboardFactory { [model] server in
+                    model.makeScreenDashboardModel(for: server)
+                }
+            )
         }
         .zIndex(2)
         .alert("Server Order Couldn’t Be Saved", isPresented: Binding(
@@ -1281,6 +1287,7 @@ private struct ServerDetailView: View {
 
     @State private var isReviewingHostKey = false
     @State private var showsAllWorkspaces = false
+    @Environment(\.screenDashboardFactory) private var screenDashboardFactory
 
     var body: some View {
         List {
@@ -1374,6 +1381,22 @@ private struct ServerDetailView: View {
             .libraryHomeListRowSurface()
 
             availableSessionsSection
+
+            if let screenDashboardFactory {
+                Section {
+                    NavigationLink {
+                        ScreenDashboardView(model: screenDashboardFactory.make(server))
+                    } label: {
+                        Label("Screen Sessions", systemImage: "rectangle.stack")
+                    }
+                    .accessibilityIdentifier("library.server.screen-sessions")
+                } header: {
+                    Text("GNU Screen")
+                } footer: {
+                    Text("List, start, and attach to GNU Screen sessions on this server.")
+                }
+                .libraryHomeListRowSurface()
+            }
         }
         .listStyle(.insetGrouped)
         .libraryHomeGroupedScrollBackground()

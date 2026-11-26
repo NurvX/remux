@@ -9,6 +9,29 @@ struct RemuxSSHExecResult: Equatable, Sendable {
     let stderr: Data
 }
 
+/// Terminal parameters for an interactive exec channel (RFC 4254 6.2).
+struct RemuxSSHPTYRequest: Equatable, Sendable {
+    var term: String
+    var columns: Int
+    var rows: Int
+    var pixelWidth: Int
+    var pixelHeight: Int
+
+    init(
+        term: String = "xterm-256color",
+        columns: Int,
+        rows: Int,
+        pixelWidth: Int = 0,
+        pixelHeight: Int = 0
+    ) {
+        self.term = term
+        self.columns = max(columns, 1)
+        self.rows = max(rows, 1)
+        self.pixelWidth = max(pixelWidth, 0)
+        self.pixelHeight = max(pixelHeight, 0)
+    }
+}
+
 enum RemuxSSHExecSessionError: Error, Equatable, LocalizedError {
     case requestFailed
     case missingExitStatus
@@ -55,6 +78,20 @@ final class RemuxSSHExecConnection: @unchecked Sendable {
         buffer.writeBytes(data)
         try await sessionChannel.writeAndFlush(
             SSHChannelData(type: .channel, data: .byteBuffer(buffer))
+        )
+    }
+
+    /// Sends an SSH `window-change` request so the remote PTY (and the
+    /// program on it) receives SIGWINCH. Only meaningful for channels opened
+    /// with a PTY.
+    func resizePTY(columns: Int, rows: Int, pixelWidth: Int = 0, pixelHeight: Int = 0) async throws {
+        try await sessionChannel.triggerUserOutboundEvent(
+            SSHChannelRequestEvent.WindowChangeRequest(
+                terminalCharacterWidth: max(columns, 1),
+                terminalRowHeight: max(rows, 1),
+                terminalPixelWidth: max(pixelWidth, 0),
+                terminalPixelHeight: max(pixelHeight, 0)
+            )
         )
     }
 
@@ -208,6 +245,35 @@ enum RemuxSSHExecSession {
                 trace: trace,
                 lifetime: lifetime,
                 closeOnRemoteEOFAndExitStatus: false,
+                pty: nil,
+                onData: onData,
+                onFinish: onFinish
+            )
+        }
+    }
+
+    /// Opens a long-lived exec channel with a pseudo-terminal, for programs
+    /// that need a real terminal (for example `screen -r`). Inbound bytes
+    /// arrive through `onData`; write keystrokes with
+    /// `RemuxSSHExecConnection.write` and report size changes with
+    /// `RemuxSSHExecConnection.resizePTY`.
+    static func openInteractive(
+        using claimedRoot: RemuxSSHClaimedRoot,
+        command: String,
+        pty: RemuxSSHPTYRequest,
+        trace: RemuxTransportStartupTrace,
+        onData: @escaping @Sendable (SSHChannelData.DataType, Data) -> Void,
+        onFinish: @escaping @Sendable (Int?, Error?) -> Void
+    ) async throws -> RemuxSSHExecConnection {
+        let lifetime = makeLifetime(for: claimedRoot)
+        return try await open(lifetime: lifetime) {
+            try await open(
+                using: claimedRoot,
+                command: command,
+                trace: trace,
+                lifetime: lifetime,
+                closeOnRemoteEOFAndExitStatus: false,
+                pty: pty,
                 onData: onData,
                 onFinish: onFinish
             )
@@ -238,6 +304,7 @@ enum RemuxSSHExecSession {
         trace: RemuxTransportStartupTrace,
         lifetime: RemuxSSHExecLifetimeOwner,
         closeOnRemoteEOFAndExitStatus: Bool,
+        pty: RemuxSSHPTYRequest?,
         onData: @escaping @Sendable (SSHChannelData.DataType, Data) -> Void,
         onFinish: @escaping @Sendable (Int?, Error?) -> Void
     ) async throws -> RemuxSSHExecConnection {
@@ -257,6 +324,26 @@ enum RemuxSSHExecSession {
 
             try await trace.stage("sessionChannel.handler.add") {
                 try await sessionChannel.pipeline.addHandler(handler).get()
+            }
+            if let pty {
+                try await trace.stage(
+                    "pty.request",
+                    fields: ["columns": "\(pty.columns)", "rows": "\(pty.rows)"]
+                ) {
+                    try Task.checkCancellation()
+                    handler.expectExecReply()
+                    try await sessionChannel.triggerUserOutboundEvent(
+                        SSHChannelRequestEvent.PseudoTerminalRequest(
+                            wantReply: true,
+                            term: pty.term,
+                            terminalCharacterWidth: pty.columns,
+                            terminalRowHeight: pty.rows,
+                            terminalPixelWidth: pty.pixelWidth,
+                            terminalPixelHeight: pty.pixelHeight,
+                            terminalModes: SSHTerminalModes([:])
+                        )
+                    )
+                }
             }
             try await trace.stage(
                 "exec.request",
@@ -296,6 +383,7 @@ enum RemuxSSHExecSession {
                     trace: trace,
                     lifetime: lifetime,
                     closeOnRemoteEOFAndExitStatus: true,
+                    pty: nil,
                     onData: { type, data in
                         collector.receive(type: type, data: data)
                     },

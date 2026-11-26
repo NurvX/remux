@@ -1679,6 +1679,21 @@ final class RemuxRootModel: ObservableObject {
         )
     }
 
+    /// Builds the GNU Screen dashboard for a saved server. Credentials are
+    /// resolved on each SSH call so edits to the server take effect.
+    func makeScreenDashboardModel(for server: SavedServer) -> ScreenDashboardModel {
+        let service = ScreenSessionService(
+            server: server,
+            terminalSettings: terminalSettings,
+            dependencies: dependencies,
+            resolveAuth: { [weak self] in
+                guard let self else { throw CancellationError() }
+                return try await self.resolveSSHAuth(for: server)
+            }
+        )
+        return ScreenDashboardModel(service: service)
+    }
+
     private func resolveSSHAuth(for server: SavedServer) async throws -> ResolvedSSHAuth {
         try await SSHAuthResolver(
             credentialStore: dependencies.credentialStore

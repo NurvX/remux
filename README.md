@@ -24,6 +24,9 @@ terminal, and uploads photos and files, with markup for images.
 ## Features
 
 - **tmux sessions**: Attach to running sessions or start new ones.
+- **GNU Screen sessions**: List, start, and kill Screen sessions on a
+  server, send quick commands without attaching, wipe dead sockets, and
+  attach in a full terminal with a Ctrl+A key bar.
 - **Windows and panes**: Swipe between windows, pick panes from a bottom
   sheet with live previews, and split, zoom, or close them.
 - **Shortcut palette**: Run saved commands with a tap. Starter sets cover
